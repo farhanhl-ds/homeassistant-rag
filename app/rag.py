@@ -11,29 +11,22 @@ import os
 import psycopg
 from dotenv import load_dotenv
 from fastembed import TextEmbedding
+from fastembed.rerank.cross_encoder import TextCrossEncoder
+
 from groq import Groq
 from pgvector.psycopg import register_vector
 
 load_dotenv()
 
-EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-# LLM_MODEL = "llama-3.1-8b-instant"
-LLM_MODEL = "openai/gpt-oss-20b"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-PROMPT_TEMPLATE = """You are a helpful assistant answering questions about Home Assistant, \
-Zigbee2MQTT, and ESPHome using the CONTEXT below. Only use the context; if the answer \
-isn't there, say you don't know.
-
-CONTEXT:
-{context}
-
-QUESTION: {question}
-
-ANSWER:"""
-
 _embedder = None
+_reranker = None
 
 
 def get_embedder():
@@ -41,6 +34,13 @@ def get_embedder():
     if _embedder is None:
         _embedder = TextEmbedding(model_name=EMBEDDING_MODEL)
     return _embedder
+
+
+def get_reranker():
+    global _reranker
+    if _reranker is None:
+        _reranker = TextCrossEncoder(model_name=RERANK_MODEL)
+    return _reranker
 
 
 def get_pg_dsn() -> str:
@@ -52,6 +52,8 @@ def get_pg_dsn() -> str:
         f"password={os.getenv('POSTGRES_PASSWORD', 'ragpass')}"
     )
 
+
+# ---------- Retrieval ----------
 
 def embed_query(query: str) -> list[float]:
     return list(get_embedder().embed([query]))[0].tolist()
@@ -114,11 +116,77 @@ def retrieve(query: str, mode: str = "hybrid", top_k: int = 5) -> list[dict]:
     cols = ["doc_id", "source", "source_url", "title", "content"]
     return [dict(zip(cols, r)) for r in rows]
 
+# ---------- Reranking (best-practice rubric item) ----------
 
-def build_prompt(question: str, chunks: list[dict]) -> str:
+def rerank(query: str, chunks: list[dict], top_k: int = 5) -> list[dict]:
+    """Re-scores candidate chunks with a cross-encoder (more accurate, slower
+    than the bi-encoder/text search used for initial retrieval) and returns
+    the top_k best matches."""
+    if not chunks:
+        return chunks
+    documents = [c["content"] for c in chunks]
+    scores = list(get_reranker().rerank(query, documents))
+    for c, s in zip(chunks, scores):
+        c["rerank_score"] = float(s)
+    return sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)[:top_k]
+
+
+def retrieve_reranked(query: str, mode: str = "hybrid", candidate_k: int = 20,
+                       top_k: int = 5) -> list[dict]:
+    """Retrieve a larger candidate pool, then rerank down to top_k."""
+    candidates = retrieve(query, mode=mode, top_k=candidate_k)
+    return rerank(query, candidates, top_k=top_k)
+
+# ---------- Query rewriting (best-practice rubric item) ----------
+
+def rewrite_query(raw_query: str) -> str:
+    """Cheap query rewrite: expand abbreviations / make standalone. Falls back
+    to the raw query if the LLM call fails, so retrieval never breaks."""
+    try:
+        prompt = (
+            "Rewrite the user question into a clear, standalone search query "
+            "for a smart-home documentation search engine. Keep it short, no preamble.\n\n"
+            f"Question: {raw_query}\nRewritten query:"
+        )
+        return call_llm(prompt).strip()
+    except Exception:
+        return raw_query
+
+
+# ---------- Prompt building ----------
+
+PROMPT_TEMPLATE_V1 = """You are a helpful assistant answering questions about Home Assistant, \
+Zigbee2MQTT, and ESPHome using the CONTEXT below. Only use the context; if the answer \
+isn't there, say you don't know.
+
+CONTEXT:
+{context}
+
+QUESTION: {question}
+
+ANSWER:"""
+
+PROMPT_TEMPLATE_V2 = """You are a senior smart-home support engineer. Answer the QUESTION \
+strictly using the CONTEXT. Be concise, use bullet points for steps, and cite which \
+source (home_assistant / zigbee2mqtt / esphome) each fact comes from. If the context is \
+insufficient, say so explicitly instead of guessing.
+
+CONTEXT:
+{context}
+
+QUESTION: {question}
+
+ANSWER:"""
+
+PROMPTS = {"v1": PROMPT_TEMPLATE_V1, "v2": PROMPT_TEMPLATE_V2}
+
+
+def build_prompt(question: str, chunks: list[dict], prompt_version: str = "v2") -> str:
     context = "\n\n".join(f"[{c['source']}] {c['content']}" for c in chunks)
-    return PROMPT_TEMPLATE.format(context=context, question=question)
+    return PROMPTS[prompt_version].format(context=context, question=question)
 
+
+# ---------- LLM call ----------
 
 def call_llm(prompt: str) -> str:
     client = groq_client
@@ -130,8 +198,15 @@ def call_llm(prompt: str) -> str:
     return resp.choices[0].message.content
 
 
-def answer_question(question: str, mode: str = "hybrid", top_k: int = 5) -> dict:
-    chunks = retrieve(question, mode=mode, top_k=top_k)
+# ---------- End-to-end ----------
+
+def answer_question(question: str, mode: str = "hybrid", prompt_version: str = "v2", top_k: int = 5,
+                     use_rerank: bool = False, use_rewrite: bool = True) -> dict:
+    search_query = rewrite_query(question) if use_rewrite else question
+    if use_rerank:
+        chunks = retrieve_reranked(search_query, mode=mode, top_k=top_k)
+    else:
+        chunks = retrieve(search_query, mode=mode, top_k=top_k)
     prompt = build_prompt(question, chunks)
     answer = call_llm(prompt)
 
