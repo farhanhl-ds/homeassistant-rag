@@ -1,0 +1,96 @@
+{
+  "title": "Homelab Assistant Monitoring",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Questions asked over time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": "Postgres",
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) AS questions FROM conversations GROUP BY 1 ORDER BY 1",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Feedback: thumbs up vs down",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": "Postgres",
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN rating = 1 THEN 'up' ELSE 'down' END AS metric, count(*) AS value FROM feedback GROUP BY 1",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Avg response time (s)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 },
+      "datasource": "Postgres",
+      "targets": [
+        { "rawSql": "SELECT avg(response_time_s) FROM conversations", "format": "table" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Questions by retrieval mode",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 8 },
+      "datasource": "Postgres",
+      "targets": [
+        {
+          "rawSql": "SELECT retrieval_mode AS metric, count(*) AS value FROM conversations GROUP BY 1",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Questions by prompt version",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "datasource": "Postgres",
+      "targets": [
+        {
+          "rawSql": "SELECT prompt_version AS metric, count(*) AS value FROM conversations GROUP BY 1",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Negative feedback rate (last 7 days)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "datasource": "Postgres",
+      "targets": [
+        {
+          "rawSql": "SELECT (count(*) FILTER (WHERE rating = -1))::float / GREATEST(count(*),1) FROM feedback WHERE created_at > now() - interval '7 days'",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Recent questions",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": "Postgres",
+      "targets": [
+        {
+          "rawSql": "SELECT created_at, question, retrieval_mode, prompt_version, response_time_s FROM conversations ORDER BY created_at DESC LIMIT 50",
+          "format": "table"
+        }
+      ]
+    }
+  ]
+}

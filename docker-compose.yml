@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-raguser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragpass}
     ports:
-      - "5434:5432"
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./ingestion/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -17,38 +17,56 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: homeassistant-rag-api
     restart: unless-stopped
     env_file: .env
     environment:
-      # Inside the Docker network, Postgres is always reachable at the
-      # "postgres" service name on its container-internal port 5432 —
-      # regardless of what host port it's mapped to above (5433). The
-      # .env POSTGRES_HOST/PORT are for running scripts/notebooks directly
-      # on the host, so we override them here for the containerized app.
       POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8000:8000"
-    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./data:/app/data
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   ui:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: homeassistant-rag-ui
     restart: unless-stopped
     env_file: .env
     environment:
+      POSTGRES_HOST: postgres
       API_BASE_URL: http://app:8000
     depends_on:
       - app
     ports:
       - "8501:8501"
-    command: uv run streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    command: streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: homeassistant-rag-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - postgres
 
 volumes:
   pgdata:
+  grafana-data:

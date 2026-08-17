@@ -9,4 +9,3 @@ eval/golden_set.jsonl
 eval/*_results.json
 *.duckdb
 .streamlit/
-.ipynb_checkpoints/
