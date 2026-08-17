@@ -32,7 +32,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
 PG_DSN = (
     f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
-    f"port={os.getenv('POSTGRES_PORT', 5432)} "
+    f"port={os.getenv('POSTGRES_PORT', 5434)} "
     f"dbname={os.getenv('POSTGRES_DB', 'homeassistant_rag')} "
     f"user={os.getenv('POSTGRES_USER', 'raguser')} "
     f"password={os.getenv('POSTGRES_PASSWORD', 'ragpass')}"

@@ -38,7 +38,7 @@ def get_reranker():
 def get_pg_dsn() -> str:
     return (
         f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
-        f"port={os.getenv('POSTGRES_PORT', 5432)} "
+        f"port={os.getenv('POSTGRES_PORT', 5434)} "
         f"dbname={os.getenv('POSTGRES_DB', 'homeassistant_rag')} "
         f"user={os.getenv('POSTGRES_USER', 'raguser')} "
         f"password={os.getenv('POSTGRES_PASSWORD', 'ragpass')}"
