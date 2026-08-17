@@ -1,33 +1,47 @@
 """
-Refactored ingestion script from notebooks/01_mvp_prototype.ipynb.
+Ingestion script.
 
 Scrapes the doc pages listed in sources.yaml, chunks them, embeds each chunk
-locally with fastembed, and saves the result to data/ so app/rag.py can load
-it without re-scraping every time.
+locally with fastembed, and upserts into Postgres (pgvector + tsvector, so we
+can do both semantic and lexical/hybrid search - see app/rag.py).
 
-Still in-memory/file-based at this stage (no database yet which will later be
-committed once we move to Postgres+pgvector).
+Previously (see git history) this saved to data/corpus.json + embeddings.npy
+for an in-memory minsearch index. Swapped to Postgres so we can add lexical
+search and evaluate vector vs. text vs. hybrid retrieval properly.
 
 Run:
     uv run python ingestion/ingest.py
 """
-import json
+import hashlib
 import os
 import time
 
-import numpy as np
+import psycopg
 import requests
 import yaml
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from fastembed import TextEmbedding
+from pgvector.psycopg import register_vector
 from tqdm import tqdm
+
+load_dotenv()
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 HERE = os.path.dirname(__file__)
-DATA_DIR = os.path.join(HERE, "..", "data")
+
+
+def get_pg_dsn() -> str:
+    return (
+        f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
+        f"port={os.getenv('POSTGRES_PORT', 5432)} "
+        f"dbname={os.getenv('POSTGRES_DB', 'homeassistant_rag')} "
+        f"user={os.getenv('POSTGRES_USER', 'raguser')} "
+        f"password={os.getenv('POSTGRES_PASSWORD', 'ragpass')}"
+    )
 
 
 def fetch_page(url: str) -> str:
@@ -75,9 +89,11 @@ def run():
             continue
         title, text = html_to_text(html)
         for idx, chunk in enumerate(chunk_text(text)):
+            doc_id = hashlib.sha256(f"{item['url']}::{idx}".encode()).hexdigest()
             corpus.append({
+                "doc_id": doc_id,
                 "source": item["source"],
-                "url": item["url"],
+                "source_url": item["url"],
                 "title": title,
                 "chunk_idx": idx,
                 "content": chunk,
@@ -89,14 +105,27 @@ def run():
     print("Embedding chunks...")
     embedder = TextEmbedding(model_name=EMBEDDING_MODEL)
     texts = [c["content"] for c in corpus]
-    embeddings = np.array(list(embedder.embed(texts)))
+    embeddings = list(embedder.embed(texts))
 
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(os.path.join(DATA_DIR, "corpus.json"), "w") as f:
-        json.dump(corpus, f)
-    np.save(os.path.join(DATA_DIR, "embeddings.npy"), embeddings)
+    print("Writing to Postgres...")
+    with psycopg.connect(get_pg_dsn()) as conn:
+        register_vector(conn)
+        with conn.cursor() as cur:
+            for c, emb in tqdm(list(zip(corpus, embeddings)), desc="upserting"):
+                cur.execute(
+                    """
+                    INSERT INTO documents (doc_id, source, source_url, title, chunk_idx, content, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (doc_id) DO UPDATE SET
+                        content = EXCLUDED.content,
+                        embedding = EXCLUDED.embedding
+                    """,
+                    (c["doc_id"], c["source"], c["source_url"], c["title"],
+                     c["chunk_idx"], c["content"], list(emb)),
+                )
+        conn.commit()
 
-    print(f"Saved {len(corpus)} chunks + embeddings {embeddings.shape} to {DATA_DIR}")
+    print(f"Done. Upserted {len(corpus)} chunks into Postgres.")
 
 
 if __name__ == "__main__":

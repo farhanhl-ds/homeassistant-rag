@@ -1,29 +1,26 @@
 """
-Core retrieval + generation logic
-Refactored from notebooks/01_mvp_prototype.ipynb.
+Core retrieval + generation logic.
 
-Loads the corpus + embeddings saved by ingestion/ingest.py, builds an in-memory
-minsearch.VectorSearch index, and exposes answer_question() for the app/eval
-layers to reuse.
+Previously (see git history) this loaded data/corpus.json + embeddings.npy into
+an in-memory minsearch.VectorSearch index which is semantic search only. Swapped 
+to Postgres (pgvector + tsvector) so we can do lexical search too and combine both
+into hybrid search via Reciprocal Rank Fusion (RRF).
 """
-import json
 import os
 
-import numpy as np
+import psycopg
 from dotenv import load_dotenv
 from fastembed import TextEmbedding
 from groq import Groq
-from minsearch import VectorSearch
+from pgvector.psycopg import register_vector
 
 load_dotenv()
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-LLM_MODEL = "llama-3.1-8b-instant"
+# LLM_MODEL = "llama-3.1-8b-instant"
+LLM_MODEL = "openai/gpt-oss-20b"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-HERE = os.path.dirname(__file__)
-DATA_DIR = os.path.join(HERE, "..", "data")
 
 PROMPT_TEMPLATE = """You are a helpful assistant answering questions about Home Assistant, \
 Zigbee2MQTT, and ESPHome using the CONTEXT below. Only use the context; if the answer \
@@ -37,7 +34,6 @@ QUESTION: {question}
 ANSWER:"""
 
 _embedder = None
-_vindex = None
 
 
 def get_embedder():
@@ -47,29 +43,76 @@ def get_embedder():
     return _embedder
 
 
-def get_index():
-    """Lazily loads corpus.json + embeddings.npy (produced by ingestion/ingest.py)
-    and builds the in-memory vector index once per process."""
-    global _vindex
-    if _vindex is None:
-        corpus_path = os.path.join(DATA_DIR, "corpus.json")
-        embeddings_path = os.path.join(DATA_DIR, "embeddings.npy")
-        if not os.path.exists(corpus_path):
-            raise FileNotFoundError(
-                f"{corpus_path} not found - run `uv run python ingestion/ingest.py` first"
-            )
-        with open(corpus_path) as f:
-            corpus = json.load(f)
-        embeddings = np.load(embeddings_path)
-
-        _vindex = VectorSearch(keyword_fields=[])
-        _vindex.fit(embeddings, corpus)
-    return _vindex
+def get_pg_dsn() -> str:
+    return (
+        f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
+        f"port={os.getenv('POSTGRES_PORT', 5432)} "
+        f"dbname={os.getenv('POSTGRES_DB', 'homeassistant_rag')} "
+        f"user={os.getenv('POSTGRES_USER', 'raguser')} "
+        f"password={os.getenv('POSTGRES_PASSWORD', 'ragpass')}"
+    )
 
 
-def retrieve(query: str, top_k: int = 5) -> list[dict]:
-    q_emb = list(get_embedder().embed([query]))[0]
-    return get_index().search(q_emb, num_results=top_k)
+def embed_query(query: str) -> list[float]:
+    return list(get_embedder().embed([query]))[0].tolist()
+
+
+def retrieve(query: str, mode: str = "hybrid", top_k: int = 5) -> list[dict]:
+    """mode: 'vector' (semantic only) | 'text' (lexical only) | 'hybrid' (both, via RRF)"""
+    q_emb = embed_query(query)
+
+    with psycopg.connect(get_pg_dsn()) as conn:
+        register_vector(conn)
+        with conn.cursor() as cur:
+            if mode == "vector":
+                cur.execute(
+                    """
+                    SELECT doc_id, source, source_url, title, content
+                    FROM documents
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (q_emb, top_k),
+                )
+            elif mode == "text":
+                cur.execute(
+                    """
+                    SELECT doc_id, source, source_url, title, content
+                    FROM documents
+                    WHERE tsv @@ plainto_tsquery('english', %s)
+                    ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', %s)) DESC
+                    LIMIT %s
+                    """,
+                    (query, query, top_k),
+                )
+            else:  # hybrid: reciprocal rank fusion over vector + text results
+                cur.execute(
+                    """
+                    WITH vec AS (
+                        SELECT doc_id, row_number() OVER (ORDER BY embedding <=> %s::vector) AS rnk
+                        FROM documents ORDER BY embedding <=> %s::vector LIMIT 20
+                    ),
+                    txt AS (
+                        SELECT doc_id, row_number() OVER (ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', %s)) DESC) AS rnk
+                        FROM documents WHERE tsv @@ plainto_tsquery('english', %s)
+                        ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', %s)) DESC LIMIT 20
+                    ),
+                    fused AS (
+                        SELECT doc_id, SUM(1.0 / (60 + rnk)) AS score
+                        FROM (SELECT * FROM vec UNION ALL SELECT * FROM txt) u
+                        GROUP BY doc_id
+                    )
+                    SELECT d.doc_id, d.source, d.source_url, d.title, d.content
+                    FROM fused f JOIN documents d ON d.doc_id = f.doc_id
+                    ORDER BY f.score DESC
+                    LIMIT %s
+                    """,
+                    (q_emb, q_emb, query, query, query, top_k),
+                )
+            rows = cur.fetchall()
+
+    cols = ["doc_id", "source", "source_url", "title", "content"]
+    return [dict(zip(cols, r)) for r in rows]
 
 
 def build_prompt(question: str, chunks: list[dict]) -> str:
@@ -87,12 +130,21 @@ def call_llm(prompt: str) -> str:
     return resp.choices[0].message.content
 
 
-def answer_question(question: str, top_k: int = 5) -> dict:
-    chunks = retrieve(question, top_k=top_k)
+def answer_question(question: str, mode: str = "hybrid", top_k: int = 5) -> dict:
+    chunks = retrieve(question, mode=mode, top_k=top_k)
     prompt = build_prompt(question, chunks)
     answer = call_llm(prompt)
+
+    seen_urls = set()
+    sources = []
+    for c in chunks:
+        if c["source_url"] not in seen_urls:
+            seen_urls.add(c["source_url"])
+            sources.append({"url": c["source_url"], "title": c["title"]})
+
     return {
         "question": question,
         "answer": answer,
-        "sources": [{"url": c["url"], "title": c["title"]} for c in chunks],
+        "retrieval_mode": mode,
+        "sources": sources,
     }

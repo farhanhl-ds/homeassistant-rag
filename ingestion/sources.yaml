@@ -20,7 +20,6 @@ zigbee2mqtt:
     - /guide/configuration/
     - /guide/usage/pairing_devices.html
     - /guide/usage/mqtt_topics_and_messages.html
-    - /guide/faq.html
 
 esphome:
   base_url: https://esphome.io
