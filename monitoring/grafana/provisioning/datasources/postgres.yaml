@@ -4,7 +4,7 @@ datasources:
   - name: Postgres
     type: postgres
     access: proxy
-    url: postgres:5434
+    url: postgres:5432
     database: homeassistant_rag
     user: raguser
     secureJsonData:
