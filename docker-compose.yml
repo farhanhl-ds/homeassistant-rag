@@ -17,6 +17,38 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  app:
+    build: .
+    container_name: homeassistant-rag-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the Docker network, Postgres is always reachable at the
+      # "postgres" service name on its container-internal port 5432 —
+      # regardless of what host port it's mapped to above (5433). The
+      # .env POSTGRES_HOST/PORT are for running scripts/notebooks directly
+      # on the host, so we override them here for the containerized app.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  ui:
+    build: .
+    container_name: homeassistant-rag-ui
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      API_BASE_URL: http://app:8000
+    depends_on:
+      - app
+    ports:
+      - "8501:8501"
+    command: uv run streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
 
 volumes:
   pgdata:
