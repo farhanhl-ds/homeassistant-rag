@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/*
+!data/.gitkeep
+eval/golden_set.jsonl
+eval/*_results.json
+*.duckdb
+.streamlit/
+.ipynb_checkpoints/

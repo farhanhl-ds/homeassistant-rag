@@ -1,0 +1,30 @@
+# List of doc pages to scrape. Kept modest for now so ingestion stays fast during
+# development. Expand later once we're on Postgres and can index more without
+# worrying about in-memory limits.
+home_assistant:
+  base_url: https://www.home-assistant.io
+  pages:
+    - /docs/configuration/
+    - /docs/automation/
+    - /docs/automation/templating/
+    - /docs/automation/trigger/
+    - /docs/automation/condition/
+    - /docs/scripts/
+    - /integrations/mqtt/
+    - /integrations/template/
+
+zigbee2mqtt:
+  base_url: https://www.zigbee2mqtt.io
+  pages:
+    - /guide/getting-started/
+    - /guide/configuration/
+    - /guide/usage/pairing_devices.html
+    - /guide/usage/mqtt_topics_and_messages.html
+    - /guide/faq.html
+
+esphome:
+  base_url: https://esphome.io
+  pages:
+    - /guides/getting_started_hassio.html
+    - /guides/configuration-types.html
+    - /guides/faq.html
