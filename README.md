@@ -164,11 +164,3 @@ sample of chunks/questions each time `generate_golden_set.py` runs).
 **Monitoring dashboard (Grafana)** — question volume, feedback ratio, avg response time, retrieval mode / prompt version breakdown, recent questions table:
 
 ![Grafana dashboard](docs/screenshots/grafana-dashboard.png)
-
-## TODO before submission
-- [x] Fill in `sources.yaml` with final page list
-- [x] Run full ingestion, confirm chunk counts
-- [x] Run both eval scripts, paste results/table into this README
-- [x] Add screenshots of UI + Grafana dashboard
-- [ ] Record short demo video/gif (optional)
-- [ ] Decide on reranking / cloud deploy if time allows (bonus points, optional)
